@@ -93,7 +93,7 @@ async def reset_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_group_data(group_id, data)
 
     await update.message.reply_text(
-        f"🔄 Data has been reset.\n"
+        f"✅ All balances have been cleared.\n"
         f"INR Paid: 0.00\n"
         f"Rate: {rate}\n"
         f"USDT To Pay: 0.00\n"
@@ -115,4 +115,3 @@ if __name__ == '__main__':
 
     print("Bot is running...")
     app.run_polling()
-
