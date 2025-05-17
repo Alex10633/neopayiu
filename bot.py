@@ -87,7 +87,7 @@ async def add_usdt(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def reset_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     group_id = update.effective_chat.id
-    data = {"rate": 0.0, "inr_paid": 0.0, "usdt_sent": 0.0}
+    data = {"usdt_to_pay": 0.0, "inr_paid": 0.0, "usdt_sent": 0.0}
     save_group_data(group_id, data)
     await update.message.reply_text("🔄 All balances has been cleared for this group.")
 
