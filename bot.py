@@ -85,13 +85,6 @@ async def add_usdt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except (IndexError, ValueError):
         await update.message.reply_text("❌ Use format: /add 1000 or /add 1000u")
 
-async def reset_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    group_id = update.effective_chat.id
-    data = {"usdt_to_pay": 0.0, "inr_paid": 0.0, "usdt_sent": 0.0}
-    save_group_data(group_id, data)
-    await update.message.reply_text("🔄 All balances has been cleared for this group.")
-
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Welcome to INR ↔ USDT Exchange Bot! Use /set <rate> to begin.")
 
@@ -102,8 +95,6 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("set", set_rate))
     app.add_handler(CommandHandler("add", add_usdt))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_inr))
-    app.add_handler(CommandHandler("reset", reset_data))
-
 
     print("Bot is running...")
     app.run_polling()
