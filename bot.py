@@ -205,9 +205,9 @@ def daily_reset():
     logger.info("Daily reset completed.")
 
 def main():
+    # Replace config import with environment variable
     import os
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-
+    BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
@@ -222,6 +222,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
     scheduler.start()
 
     app.run_polling()
+
 
 if __name__ == '__main__':
     main()
