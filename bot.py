@@ -208,6 +208,10 @@ def main():
     # Replace config import with environment variable
     import os
     BOT_TOKEN = os.environ.get("BOT_TOKEN")
+    print(f"[DEBUG] BOT_TOKEN: {BOT_TOKEN}")
+if not BOT_TOKEN or " " in BOT_TOKEN:
+    raise ValueError("❌ BOT_TOKEN is empty or malformed.")
+
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
