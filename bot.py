@@ -205,7 +205,9 @@ def daily_reset():
     logger.info("Daily reset completed.")
 
 def main():
-    from config import BOT_TOKEN
+    import os
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
