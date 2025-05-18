@@ -1,100 +1,225 @@
 import logging
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
-import shelve
+from telegram import Update, ChatMember, Chat
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, CallbackContext
+from apscheduler.schedulers.background import BackgroundScheduler
+from datetime import datetime, timedelta
+import pytz
+import csv
 import os
-from dotenv import load_dotenv
 
 # Enable logging
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Load environment variables
-load_dotenv()
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+# Group-wise data store
+group_data = {}
+transaction_ids = {}
 
-# Define the database
-DB_FILE = "exchange_data.db"
+# Timezone for IST
+IST = pytz.timezone('Asia/Kolkata')
 
-def get_group_data(group_id):
-    with shelve.open(DB_FILE) as db:
-        return db.get(str(group_id), {"rate": 0.0, "inr_paid": 0.0, "usdt_sent": 0.0})
+def get_time():
+    return datetime.now(IST).strftime("%H:%M")
 
-def save_group_data(group_id, data):
-    with shelve.open(DB_FILE) as db:
-        db[str(group_id)] = data
+def get_date():
+    return datetime.now(IST).strftime("%Y-%m-%d")
 
-async def set_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    group_id = update.effective_chat.id
-    if context.args:
-        try:
-            rate = float(context.args[0])
-            data = get_group_data(group_id)
-            data['rate'] = rate
-            save_group_data(group_id, data)
-            await update.message.reply_text(f"✅ USDT rate set to {rate}")
-        except ValueError:
-            await update.message.reply_text("❌ Invalid rate format. Use: /set 91.5")
-    else:
-        await update.message.reply_text("❌ Please provide a rate. Use: /set 91.5")
+def is_admin(member: ChatMember):
+    return member.status in [ChatMember.ADMINISTRATOR, ChatMember.OWNER]
 
-async def handle_inr(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    group_id = update.effective_chat.id
-    text = update.message.text.strip()
-    data = get_group_data(group_id)
+async def check_admin(update: Update, context: CallbackContext) -> bool:
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    member = await context.bot.get_chat_member(chat_id, user_id)
+    return is_admin(member)
 
-    if text.startswith('+') or text.startswith('-'):
-        try:
-            amount = float(text)
-            data['inr_paid'] += amount
-            usdt_to_pay = data['inr_paid'] / data['rate'] if data['rate'] else 0.0
-            remaining = usdt_to_pay - data['usdt_sent']
-            save_group_data(group_id, data)
+def init_group_data(chat_id):
+    if chat_id not in group_data:
+        group_data[chat_id] = {
+            'rate': None,
+            'total_inr': 0,
+            'used_inr': 0,
+            'total_usdt': 0,
+            'sent_usdt': 0,
+            'transactions': []
+        }
+        transaction_ids[chat_id] = 1
 
-            await update.message.reply_text(
-                f"INR Paid: {data['inr_paid']:.2f}\n"
-                f"Rate: {data['rate']}\n"
-                f"USDT To Pay: {usdt_to_pay:.2f}\n"
-                f"USDT Sent: {data['usdt_sent']:.2f}\n"
-                f"Remaining: {remaining:.2f}"
-            )
-        except ValueError:
-            await update.message.reply_text("❌ Invalid amount format.")
-
-async def add_usdt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    group_id = update.effective_chat.id
-    data = get_group_data(group_id)
+async def set_rate(update: Update, context: CallbackContext):
+    if not await check_admin(update, context):
+        return
 
     try:
-        amount = float(context.args[0].replace('u', ''))
-        data['usdt_sent'] += amount
-        usdt_to_pay = data['inr_paid'] / data['rate'] if data['rate'] else 0.0
-        remaining = usdt_to_pay - data['usdt_sent']
-        save_group_data(group_id, data)
-
-        await update.message.reply_text(
-            f"INR Paid: {data['inr_paid']:.2f}\n"
-            f"Rate: {data['rate']}\n"
-            f"USDT To Pay: {usdt_to_pay:.2f}\n"
-            f"USDT Sent: {data['usdt_sent']:.2f}\n"
-            f"Remaining: {remaining:.2f}"
-        )
+        rate = float(context.args[0])
     except (IndexError, ValueError):
-        await update.message.reply_text("❌ Use format: /add 1000 or /add 1000u")
+        await update.message.reply_text("Usage: /set <rate>")
+        return
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Welcome to INR ↔ USDT Exchange Bot! Use /set <rate> to begin.")
+    chat_id = update.effective_chat.id
+    init_group_data(chat_id)
+    group_data[chat_id]['rate'] = rate
 
-if __name__ == '__main__':
-    app = ApplicationBuilder().token(TOKEN).build()
+    await update.message.reply_text(f"✅ Exchange rate set to {rate} INR per USDT.")
 
-    app.add_handler(CommandHandler("start", start))
+async def add_inr(update: Update, context: CallbackContext):
+    if not await check_admin(update, context):
+        return
+
+    text = update.message.text.strip()
+    if not text.startswith("+") and not text.startswith("-"):
+        return
+
+    try:
+        amount = float(text[1:])
+        if text.startswith("-"):
+            amount *= -1
+    except ValueError:
+        return
+
+    chat_id = update.effective_chat.id
+    init_group_data(chat_id)
+    data = group_data[chat_id]
+    data['total_inr'] += amount
+    if amount > 0:
+        data['used_inr'] += amount
+
+    record_transaction(chat_id, amount, update.message.date)
+    await send_summary(update, context)
+
+async def add_usdt(update: Update, context: CallbackContext):
+    if not await check_admin(update, context):
+        return
+
+    try:
+        usdt = float(context.args[0])
+    except (IndexError, ValueError):
+        await update.message.reply_text("Usage: /add <usdt>")
+        return
+
+    chat_id = update.effective_chat.id
+    init_group_data(chat_id)
+    group_data[chat_id]['sent_usdt'] += usdt
+
+    record_transaction(chat_id, 0, update.message.date, usdt=usdt)
+    await send_summary(update, context)
+
+async def reset_data(update: Update, context: CallbackContext):
+    if not await check_admin(update, context):
+        return
+
+    chat_id = update.effective_chat.id
+    if chat_id in group_data:
+        rate = group_data[chat_id]['rate']
+        group_data[chat_id] = {
+            'rate': rate,
+            'total_inr': 0,
+            'used_inr': 0,
+            'total_usdt': 0,
+            'sent_usdt': 0,
+            'transactions': []
+        }
+        transaction_ids[chat_id] = 1
+
+    await update.message.reply_text("✅ All data except exchange rate has been reset.")
+
+async def download_csv(update: Update, context: CallbackContext):
+    if not await check_admin(update, context):
+        return
+
+    chat_id = update.effective_chat.id
+    date_str = get_date()
+    file_path = f"data/{chat_id}_{date_str}.csv"
+
+    if not os.path.exists(file_path):
+        await update.message.reply_text("⚠️ No transactions to download today.")
+        return
+
+    await update.message.reply_document(document=open(file_path, "rb"))
+
+def record_transaction(chat_id, inr=0, time=None, usdt=0):
+    init_group_data(chat_id)
+    data = group_data[chat_id]
+    rate = data['rate'] or 1
+    now = datetime.now(IST)
+    time_str = now.strftime("%H:%M")
+    tid = f"WX{datetime.now(IST).strftime('%Y%m%d%H%M%S')}"
+    transaction_ids[chat_id] += 1
+
+    usdt_calc = inr / rate if inr else usdt
+    record = {
+        'id': tid,
+        'time': time_str,
+        'inr': inr,
+        'rate': rate,
+        'usdt': usdt_calc if inr else usdt
+    }
+    data['transactions'].append(record)
+
+    # Write to CSV
+    os.makedirs("data", exist_ok=True)
+    file_path = f"data/{chat_id}_{get_date()}.csv"
+    write_header = not os.path.exists(file_path)
+    with open(file_path, "a", newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=['id', 'time', 'inr', 'rate', 'usdt'])
+        if write_header:
+            writer.writeheader()
+        writer.writerow(record)
+
+async def send_summary(update: Update, context: CallbackContext):
+    chat_id = update.effective_chat.id
+    data = group_data[chat_id]
+    rate = data['rate'] or 1
+    total_usdt = data['total_inr'] / rate
+    remaining = total_usdt - data['sent_usdt']
+    time_now = get_time()
+    count = len(data['transactions'])
+
+    last = data['transactions'][-1]
+    summary = (
+        f"ID: {last['id']}\n"
+        f"Today Received ({count}):\n"
+        f"{last['time']} ₹{int(last['inr'])} / {int(rate)} * (1) = {last['usdt']:.2f} USDT\n"
+        f"Current Rate: {int(rate)}\n"
+        f"Total INR Today: ₹{int(data['total_inr'])}\n"
+        f"Total INR Used: ₹{int(data['used_inr'])}\n"
+        f"Total USDT Required: {total_usdt:.2f}U\n"
+        f"Total USDT Sent: {data['sent_usdt']:.2f}U\n"
+        f"Remaining USDT: {remaining:.2f}U"
+    )
+    await update.message.reply_text(summary)
+
+def daily_reset():
+    for chat_id in group_data:
+        rate = group_data[chat_id]['rate']
+        group_data[chat_id] = {
+            'rate': rate,
+            'total_inr': 0,
+            'used_inr': 0,
+            'total_usdt': 0,
+            'sent_usdt': 0,
+            'transactions': []
+        }
+        transaction_ids[chat_id] = 1
+    logger.info("Daily reset completed.")
+
+def main():
+    from config import BOT_TOKEN
+
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
     app.add_handler(CommandHandler("set", set_rate))
     app.add_handler(CommandHandler("add", add_usdt))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_inr))
+    app.add_handler(CommandHandler("reset", reset_data))
+    app.add_handler(CommandHandler("download", download_csv))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"^[+-][0-9]+"), add_inr))
 
-    print("Bot is running...")
+    scheduler = BackgroundScheduler(timezone=IST)
+    scheduler.add_job(daily_reset, 'cron', hour=0, minute=0)
+    scheduler.start()
+
     app.run_polling()
+
+if __name__ == '__main__':
+    main()
